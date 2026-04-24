@@ -1,5 +1,7 @@
 package com.mi.keycloak.apikeys.rest;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mi.keycloak.apikeys.credential.ApiKeyCredentialProvider;
 import com.mi.keycloak.apikeys.credential.ApiKeyCredentialProviderFactory;
 import com.mi.keycloak.apikeys.credential.ApiKeyCredentialModel;
@@ -21,6 +23,7 @@ import org.keycloak.representations.AccessToken;
 import org.keycloak.services.managers.AppAuthManager;
 import org.keycloak.services.managers.AuthenticationManager;
 import org.keycloak.TokenVerifier;
+import org.keycloak.wellknown.WellKnownProvider;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -28,6 +31,7 @@ import java.security.PublicKey;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -93,13 +97,33 @@ public class ApiKeyResource {
     }
 
     // -------------------------------------------------------------------------
+    // Discovery — même contenu que /.well-known/uma2-configuration natif
+    // mais avec introspection_endpoint pointant vers notre /introspect
+    // -------------------------------------------------------------------------
+
+    @GET
+    @Path("/.well-known/uma2-configuration")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response uma2WellKnown() {
+        WellKnownProvider nativeProvider = session.getProvider(WellKnownProvider.class, "uma2-configuration");
+        Map<String, Object> config = new ObjectMapper().convertValue(
+            nativeProvider.getConfig(), new TypeReference<>() {});
+
+        String base = session.getContext().getUri().getBaseUri().toString();
+        config.put("introspection_endpoint",
+            base + "realms/" + realm.getName() + "/api-keys/introspect");
+
+        return Response.ok(config).build();
+    }
+
+    // -------------------------------------------------------------------------
     // Endpoint d'introspection unifié — RFC 7662 compatible
     // Accepte à la fois les JWT Keycloak et les API keys (mk_...)
     // Même interface que /protocol/openid-connect/token/introspect
     // -------------------------------------------------------------------------
 
     @POST
-    @Path("/verify")
+    @Path("/introspect")
     @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
     @Produces(MediaType.APPLICATION_JSON)
     public Response introspect(
