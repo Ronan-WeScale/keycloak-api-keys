@@ -1,5 +1,9 @@
 
-### Update
+### Bug Fixes
 
-- Verify and scoped key / fix: User label ([2c933c6](../../commit/2c933c666e7cf68df82325dd8f7c8b1f6eb12d08))
+- Rebase on main before push in release workflow ([90330e5](../../commit/90330e5d5a90cd264215fcb32c4383172acda23b))
+
+### Features
+
+- Unified introspection endpoint compatible RFC 7662 ([d33922c](../../commit/d33922cd55223635d15c669600ad78735da2e543))
 
