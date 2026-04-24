@@ -9,16 +9,23 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
+import org.keycloak.common.VerificationException;
+import org.keycloak.crypto.KeyUse;
+import org.keycloak.crypto.KeyWrapper;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.representations.AccessToken;
 import org.keycloak.services.managers.AppAuthManager;
 import org.keycloak.services.managers.AuthenticationManager;
+import org.keycloak.TokenVerifier;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.PublicKey;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
@@ -86,47 +93,103 @@ public class ApiKeyResource {
     }
 
     // -------------------------------------------------------------------------
-    // Endpoint de vérification — protégé par client credentials (Basic Auth)
+    // Endpoint d'introspection unifié — RFC 7662 compatible
+    // Accepte à la fois les JWT Keycloak et les API keys (mk_...)
+    // Même interface que /protocol/openid-connect/token/introspect
     // -------------------------------------------------------------------------
 
     @POST
     @Path("/verify")
-    @Consumes(MediaType.APPLICATION_JSON)
+    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
     @Produces(MediaType.APPLICATION_JSON)
-    public Response verifyKey(VerifyApiKeyRequest req) {
-        authenticateClient();
+    public Response introspect(
+            @FormParam("client_id") String clientId,
+            @FormParam("client_secret") String clientSecret,
+            @FormParam("token") String token) {
 
-        if (req == null || req.key == null || req.key.isBlank()) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                .entity("{\"error\":\"key is required\"}").build();
+        authenticateClient(clientId, clientSecret);
+
+        if (token == null || token.isBlank()) {
+            return Response.ok(inactive()).build();
         }
+
+        // Détection du type de token par le préfixe
+        if (token.startsWith("mk_")) {
+            return introspectApiKey(token.trim());
+        } else {
+            return introspectJwt(token.trim());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+
+    private Response introspectApiKey(String rawKey) {
+        Optional<ApiKeyCredentialProvider.VerifyResult> match = provider().verifyKey(realm, rawKey);
+        if (match.isEmpty()) {
+            return Response.ok(inactive()).build();
+        }
+
+        UserModel user = match.get().user();
+        ApiKeyCredentialModel credential = match.get().credential();
+
+        Set<String> userRoles = user.getRoleMappingsStream()
+            .map(RoleModel::getName)
+            .collect(Collectors.toSet());
+
+        List<String> storedRoles = credential.getApiKeyCredentialData().roles;
+        List<String> effectiveRoles = (storedRoles == null || storedRoles.isEmpty())
+            ? userRoles.stream().sorted().toList()
+            : storedRoles.stream().filter(userRoles::contains).sorted().toList();
+
+        Long expiresAt = credential.getApiKeyCredentialData().expiresAt;
+        Long createdAt = credential.getApiKeyCredentialData().createdAt;
 
         VerifyApiKeyResponse resp = new VerifyApiKeyResponse();
-
-        Optional<ApiKeyCredentialProvider.VerifyResult> match = provider().verifyKey(realm, req.key.trim());
-        if (match.isPresent()) {
-            UserModel user = match.get().user();
-            ApiKeyCredentialModel credential = match.get().credential();
-
-            Set<String> userRoles = user.getRoleMappingsStream()
-                .map(RoleModel::getName)
-                .collect(Collectors.toSet());
-
-            List<String> storedRoles = credential.getApiKeyCredentialData().roles;
-            List<String> effectiveRoles = (storedRoles == null || storedRoles.isEmpty())
-                ? userRoles.stream().sorted().toList()
-                : storedRoles.stream().filter(userRoles::contains).sorted().toList();
-
-            resp.valid = true;
-            resp.userId = user.getId();
-            resp.username = user.getUsername();
-            resp.email = user.getEmail();
-            resp.roles = effectiveRoles;
-        } else {
-            resp.valid = false;
-        }
-
+        resp.active = true;
+        resp.sub = user.getId();
+        resp.username = user.getUsername();
+        resp.email = user.getEmail();
+        resp.iat = createdAt != null ? createdAt / 1000 : null;
+        resp.exp = expiresAt != null ? expiresAt / 1000 : null;
+        resp.realmAccess = new VerifyApiKeyResponse.RealmAccess(effectiveRoles);
         return Response.ok(resp).build();
+    }
+
+    private Response introspectJwt(String rawToken) {
+        try {
+            TokenVerifier<AccessToken> verifier = TokenVerifier.create(rawToken, AccessToken.class);
+            String kid = verifier.getHeader().getKeyId();
+            String algorithm = verifier.getHeader().getAlgorithm().name();
+
+            KeyWrapper key = session.keys().getKey(realm, kid, KeyUse.SIG, algorithm);
+            if (key == null) return Response.ok(inactive()).build();
+
+            AccessToken accessToken = verifier
+                .publicKey((PublicKey) key.getPublicKey())
+                .verify()
+                .getToken();
+
+            if (!accessToken.isActive()) return Response.ok(inactive()).build();
+
+            VerifyApiKeyResponse resp = new VerifyApiKeyResponse();
+            resp.active = true;
+            resp.sub = accessToken.getSubject();
+            resp.username = accessToken.getPreferredUsername();
+            resp.email = accessToken.getEmail();
+            resp.exp = accessToken.getExp();
+            resp.iat = accessToken.getIat();
+            if (accessToken.getRealmAccess() != null) {
+                resp.realmAccess = new VerifyApiKeyResponse.RealmAccess(
+                    new ArrayList<>(accessToken.getRealmAccess().getRoles()));
+            }
+            return Response.ok(resp).build();
+        } catch (VerificationException e) {
+            return Response.ok(inactive()).build();
+        }
+    }
+
+    private static VerifyApiKeyResponse inactive() {
+        return new VerifyApiKeyResponse(); // active = false par défaut
     }
 
     // -------------------------------------------------------------------------
@@ -141,34 +204,35 @@ public class ApiKeyResource {
         return auth.getUser();
     }
 
-    private void authenticateClient() {
-        String authHeader = session.getContext().getHttpRequest()
-            .getHttpHeaders().getHeaderString(HttpHeaders.AUTHORIZATION);
-
-        if (authHeader == null || !authHeader.startsWith("Basic ")) {
-            throw new NotAuthorizedException("Basic realm=\"keycloak\"");
+    private void authenticateClient(String clientId, String clientSecret) {
+        // Support aussi Basic Auth en fallback (RFC 6749 §2.3)
+        if (clientId == null || clientId.isBlank()) {
+            String authHeader = session.getContext().getHttpRequest()
+                .getHttpHeaders().getHeaderString(HttpHeaders.AUTHORIZATION);
+            if (authHeader != null && authHeader.startsWith("Basic ")) {
+                try {
+                    String decoded = new String(Base64.getDecoder().decode(authHeader.substring(6)), StandardCharsets.UTF_8);
+                    int colon = decoded.indexOf(':');
+                    if (colon > 0) {
+                        clientId = decoded.substring(0, colon);
+                        clientSecret = decoded.substring(colon + 1);
+                    }
+                } catch (IllegalArgumentException ignored) {}
+            }
         }
 
-        String clientId;
-        String clientSecret;
-        try {
-            String decoded = new String(Base64.getDecoder().decode(authHeader.substring(6)), StandardCharsets.UTF_8);
-            int colon = decoded.indexOf(':');
-            if (colon <= 0) throw new IllegalArgumentException();
-            clientId = decoded.substring(0, colon);
-            clientSecret = decoded.substring(colon + 1);
-        } catch (IllegalArgumentException e) {
-            throw new NotAuthorizedException("Basic realm=\"keycloak\"");
+        if (clientId == null || clientId.isBlank() || clientSecret == null) {
+            throw new NotAuthorizedException("client_id and client_secret are required");
         }
 
         ClientModel client = realm.getClientByClientId(clientId);
         if (client == null || !client.isEnabled() || client.isPublicClient()) {
-            throw new NotAuthorizedException("Basic realm=\"keycloak\"");
+            throw new NotAuthorizedException("Invalid client");
         }
         if (!MessageDigest.isEqual(
                 clientSecret.getBytes(StandardCharsets.UTF_8),
                 client.getSecret().getBytes(StandardCharsets.UTF_8))) {
-            throw new NotAuthorizedException("Basic realm=\"keycloak\"");
+            throw new NotAuthorizedException("Invalid client credentials");
         }
     }
 
