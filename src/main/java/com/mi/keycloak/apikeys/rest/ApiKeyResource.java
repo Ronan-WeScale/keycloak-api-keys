@@ -102,7 +102,7 @@ public class ApiKeyResource {
     // -------------------------------------------------------------------------
 
     @GET
-    @Path("/.well-known/uma2-configuration")
+    @Path("/uma2-configuration")
     @Produces(MediaType.APPLICATION_JSON)
     public Response uma2WellKnown() {
         WellKnownProvider nativeProvider = session.getProvider(WellKnownProvider.class, "uma2-configuration");
