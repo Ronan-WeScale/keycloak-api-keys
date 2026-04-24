@@ -13,9 +13,10 @@ public class ApiKeyCredentialModel extends CredentialModel {
     private CredentialData credentialData;
     private SecretData secretData;
 
-    public static ApiKeyCredentialModel create(String name, String hashedKey, String prefix, Long expiresAt) {
+    public static ApiKeyCredentialModel create(String name, String hashedKey, String prefix, Long expiresAt, java.util.List<String> roles) {
         ApiKeyCredentialModel model = new ApiKeyCredentialModel();
         model.setType(TYPE);
+        model.setUserLabel(name);
         model.setCreatedDate(System.currentTimeMillis());
 
         CredentialData cd = new CredentialData();
@@ -23,6 +24,7 @@ public class ApiKeyCredentialModel extends CredentialModel {
         cd.prefix = prefix;
         cd.createdAt = System.currentTimeMillis();
         cd.expiresAt = expiresAt;
+        cd.roles = (roles != null && !roles.isEmpty()) ? roles : null;
 
         SecretData sd = new SecretData();
         sd.hashedKey = hashedKey;
@@ -43,6 +45,7 @@ public class ApiKeyCredentialModel extends CredentialModel {
         ApiKeyCredentialModel m = new ApiKeyCredentialModel();
         m.setId(model.getId());
         m.setType(model.getType());
+        m.setUserLabel(model.getUserLabel());
         m.setCreatedDate(model.getCreatedDate());
         m.setCredentialData(model.getCredentialData());
         m.setSecretData(model.getSecretData());
@@ -66,6 +69,7 @@ public class ApiKeyCredentialModel extends CredentialModel {
         public Long createdAt;
         public Long expiresAt;
         public Long lastUsed;
+        public java.util.List<String> roles; // null = unrestricted
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

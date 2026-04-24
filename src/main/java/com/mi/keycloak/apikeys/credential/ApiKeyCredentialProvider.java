@@ -1,11 +1,13 @@
 package com.mi.keycloak.apikeys.credential;
 
+import jakarta.ws.rs.BadRequestException;
 import org.keycloak.credential.CredentialModel;
 import org.keycloak.credential.CredentialProvider;
 import org.keycloak.credential.CredentialTypeMetadata;
 import org.keycloak.credential.CredentialTypeMetadataContext;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 
 import java.nio.charset.StandardCharsets;
@@ -15,6 +17,7 @@ import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class ApiKeyCredentialProvider implements CredentialProvider<ApiKeyCredentialModel> {
@@ -42,7 +45,6 @@ public class ApiKeyCredentialProvider implements CredentialProvider<ApiKeyCreden
     @Override
     public CredentialModel createCredential(RealmModel realm, UserModel user, ApiKeyCredentialModel model) {
         CredentialModel stored = user.credentialManager().createStoredCredential(model);
-        // Index prefix → user for reverse lookup on verify
         String prefix = model.getApiKeyCredentialData().prefix;
         user.setAttribute(PREFIX_ATTR_PREFIX + prefix, List.of("1"));
         return stored;
@@ -50,7 +52,6 @@ public class ApiKeyCredentialProvider implements CredentialProvider<ApiKeyCreden
 
     @Override
     public boolean deleteCredential(RealmModel realm, UserModel user, String credentialId) {
-        // Remove prefix index attribute before deleting
         user.credentialManager()
             .getStoredCredentialsByTypeStream(ApiKeyCredentialModel.TYPE)
             .map(ApiKeyCredentialModel::from)
@@ -63,13 +64,27 @@ public class ApiKeyCredentialProvider implements CredentialProvider<ApiKeyCreden
 
     public record CreatedKey(ApiKeyCredentialModel model, String rawKey) {}
 
-    public CreatedKey generateKey(RealmModel realm, UserModel user, String name, Long expiresAt) {
+    public record VerifyResult(UserModel user, ApiKeyCredentialModel credential) {}
+
+    public CreatedKey generateKey(RealmModel realm, UserModel user, String name, Long expiresAt, List<String> roles) {
+        if (roles != null && !roles.isEmpty()) {
+            Set<String> userRoles = user.getRoleMappingsStream()
+                .map(RoleModel::getName)
+                .collect(Collectors.toSet());
+            List<String> missing = roles.stream()
+                .filter(r -> !userRoles.contains(r))
+                .toList();
+            if (!missing.isEmpty()) {
+                throw new BadRequestException("User does not have roles: " + missing);
+            }
+        }
+
         byte[] bytes = new byte[KEY_BYTES];
         RANDOM.nextBytes(bytes);
         String rawKey = "mk_" + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-        String prefix = rawKey.substring(3, 11); // 8 chars after "mk_"
+        String prefix = rawKey.substring(3, 11);
 
-        ApiKeyCredentialModel model = ApiKeyCredentialModel.create(name, hash(rawKey), prefix, expiresAt);
+        ApiKeyCredentialModel model = ApiKeyCredentialModel.create(name, hash(rawKey), prefix, expiresAt, roles);
         CredentialModel stored = createCredential(realm, user, model);
         return new CreatedKey(ApiKeyCredentialModel.from(stored), rawKey);
     }
@@ -81,7 +96,7 @@ public class ApiKeyCredentialProvider implements CredentialProvider<ApiKeyCreden
             .collect(Collectors.toList());
     }
 
-    public Optional<UserModel> verifyKey(RealmModel realm, String rawKey) {
+    public Optional<VerifyResult> verifyKey(RealmModel realm, String rawKey) {
         if (rawKey == null || !rawKey.startsWith("mk_") || rawKey.length() < 11) {
             return Optional.empty();
         }
@@ -91,19 +106,22 @@ public class ApiKeyCredentialProvider implements CredentialProvider<ApiKeyCreden
 
         return session.users()
             .searchForUserByUserAttributeStream(realm, PREFIX_ATTR_PREFIX + prefix, "1")
-            .filter(user -> matchesCredential(user, hashed))
+            .flatMap(user -> findMatchingCredential(user, hashed)
+                .map(cred -> new VerifyResult(user, cred))
+                .stream())
             .findFirst();
     }
 
-    private boolean matchesCredential(UserModel user, String hashed) {
+    private Optional<ApiKeyCredentialModel> findMatchingCredential(UserModel user, String hashed) {
         return user.credentialManager()
             .getStoredCredentialsByTypeStream(ApiKeyCredentialModel.TYPE)
             .map(ApiKeyCredentialModel::from)
-            .anyMatch(k -> {
+            .filter(k -> {
                 if (!hashed.equals(k.getApiKeySecretData().hashedKey)) return false;
                 Long exp = k.getApiKeyCredentialData().expiresAt;
                 return exp == null || exp > System.currentTimeMillis();
-            });
+            })
+            .findFirst();
     }
 
     @Override
