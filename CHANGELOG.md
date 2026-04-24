@@ -1,9 +1,9 @@
 
 ### Bug Fixes
 
-- Rebase on main before push in release workflow ([90330e5](../../commit/90330e5d5a90cd264215fcb32c4383172acda23b))
+- Make release push idempotent against concurrent main commits ([a0a5104](../../commit/a0a510499daff7ea6131ac7494ff5ec81c589543))
 
 ### Features
 
-- Unified introspection endpoint compatible RFC 7662 ([d33922c](../../commit/d33922cd55223635d15c669600ad78735da2e543))
+- Add UMA2 well-known discovery endpoint and rename /verify to /introspect ([7d804c8](../../commit/7d804c8364a2ad817f87822c3ec77aa5ecf9ba9c))
 
