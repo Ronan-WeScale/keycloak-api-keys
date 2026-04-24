@@ -1,5 +1,5 @@
 
-### Bug Fixes
+### Update
 
-- Replace git-cliff-action with direct binary install ([f74c84c](../../commit/f74c84c8f6fa0978191f43fa5004c6cf96279441))
+- Verify and scoped key / fix: User label ([2c933c6](../../commit/2c933c666e7cf68df82325dd8f7c8b1f6eb12d08))
 
