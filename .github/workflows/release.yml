@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Push sur main après mise à jour du README nécessite un token avec droits d'écriture
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Extract versions
+        id: versions
+        run: |
+          PLUGIN_VERSION="${GITHUB_REF_NAME#v}"
+          KC_VERSION=$(mvn help:evaluate -Dexpression=keycloak.version -q -DforceStdout)
+          KC_MAJOR=$(echo "$KC_VERSION" | grep -oE '^[0-9]+\.[0-9]+')
+          echo "plugin_version=$PLUGIN_VERSION"   >> "$GITHUB_OUTPUT"
+          echo "kc_version=$KC_VERSION"           >> "$GITHUB_OUTPUT"
+          echo "kc_major=$KC_MAJOR"               >> "$GITHUB_OUTPUT"
+
+      - name: Align pom.xml version with tag
+        run: mvn -q versions:set -DnewVersion="${{ steps.versions.outputs.plugin_version }}" -DgenerateBackupPoms=false
+
+      - name: Build JAR
+        run: mvn package -DskipTests
+
+      - name: Generate changelog
+        id: cliff
+        uses: orhun/git-cliff-action@v3
+        with:
+          config: .github/cliff.toml
+          args: --current --strip header
+        env:
+          OUTPUT: CHANGELOG.md
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Update compatibility table in README
+        run: |
+          PLUGIN="${{ steps.versions.outputs.plugin_version }}"
+          KC="${{ steps.versions.outputs.kc_major }}"
+
+          python3 - "$PLUGIN" "$KC" <<'PYEOF'
+          import sys, re
+
+          plugin, kc = sys.argv[1], sys.argv[2]
+          new_row = f"| {plugin:<10} | {kc}.x{' ' * max(0, 8 - len(kc) - 2)} |"
+
+          readme = open("README.md").read()
+          pattern = re.compile(
+              r"(<!-- COMPAT_TABLE_START -->.*?\| Plugin.*?\|[-| ]+\n)(.*?)(<!-- COMPAT_TABLE_END -->)",
+              re.DOTALL
+          )
+
+          def inject(m):
+              header = m.group(1)
+              existing = m.group(2)
+              # Remove duplicate if same plugin version already listed
+              rows = [r for r in existing.splitlines(keepends=True) if not r.startswith(f"| {plugin}")]
+              return header + new_row + "\n" + "".join(rows) + m.group(3)
+
+          updated = pattern.sub(inject, readme)
+          open("README.md", "w").write(updated)
+          print(f"Added row: {new_row}")
+          PYEOF
+
+      - name: Commit updated README and pom.xml
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md pom.xml CHANGELOG.md
+          git diff --staged --quiet || git commit -m "chore: release v${{ steps.versions.outputs.plugin_version }}"
+          git push origin HEAD:main
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ steps.versions.outputs.plugin_version }}"
+          body_path: CHANGELOG.md
+          files: target/keycloak-api-keys-${{ steps.versions.outputs.plugin_version }}.jar
+          make_latest: true
