@@ -182,8 +182,7 @@ public class ApiKeyResource {
     }
 
     private Response proxyToRealTokenEndpoint(MultivaluedMap<String, String> formParams, String bearerToken) {
-        String realUrl = session.getContext().getUri().getBaseUri().toString()
-            + "realms/" + realm.getName() + "/protocol/openid-connect/token";
+        String realUrl = baseUrl().replace("/api-keys", "") + "/protocol/openid-connect/token";
 
         StringBuilder body = new StringBuilder();
         formParams.forEach((key, values) -> values.forEach(value -> {
@@ -293,8 +292,9 @@ public class ApiKeyResource {
     }
 
     private String baseUrl() {
-        return session.getContext().getUri().getBaseUri().toString()
-            + "realms/" + realm.getName() + "/api-keys";
+        String base = session.getContext().getUri().getBaseUri().toString();
+        if (!base.endsWith("/")) base += "/";
+        return base + "realms/" + realm.getName() + "/api-keys";
     }
 
     // -------------------------------------------------------------------------
