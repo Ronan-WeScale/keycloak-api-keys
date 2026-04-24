@@ -82,11 +82,24 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Sauvegarder les fichiers générés depuis le commit du tag
+          cp README.md   /tmp/release-README.md
+          cp pom.xml     /tmp/release-pom.xml
+          cp CHANGELOG.md /tmp/release-CHANGELOG.md
+
+          # Se positionner sur le tip actuel de main (évite tout conflit de rebase)
+          git fetch origin main
+          git checkout -B main origin/main
+
+          # Appliquer les fichiers générés par-dessus main
+          cp /tmp/release-README.md   README.md
+          cp /tmp/release-pom.xml     pom.xml
+          cp /tmp/release-CHANGELOG.md CHANGELOG.md
+
           git add README.md pom.xml CHANGELOG.md
           git diff --staged --quiet || git commit -m "chore: release v${{ steps.versions.outputs.plugin_version }}"
-          git fetch origin main
-          git rebase origin/main
-          git push origin HEAD:main
+          git push origin main
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
