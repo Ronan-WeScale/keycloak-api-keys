@@ -1,5 +1,5 @@
 
-### Features
+### Bug Fixes
 
-- Add UMA token endpoint for authz-keycloak compatibility ([e7ac3f1](../../commit/e7ac3f1e7c690a6477b71d0d52182819cfd9085c))
+- Ensure trailing slash in base URI for URL construction ([a68563b](../../commit/a68563b89b7dfd70b27b2b4060c7250402ae9a49))
 
