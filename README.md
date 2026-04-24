@@ -7,7 +7,7 @@ Plugin Keycloak pour la gestion de clés d'API opaques (style GitHub PAT) liées
 <!-- COMPAT_TABLE_START -->
 | Plugin     | Keycloak  |
 |------------|-----------|
-| 1.0.0      | 26.x      |
+| 1.0.0      | 26.0.x   |
 <!-- COMPAT_TABLE_END -->
 
 ## Build
