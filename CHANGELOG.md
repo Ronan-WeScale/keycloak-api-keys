@@ -1,5 +1,5 @@
 
-### Bug Fixes
+### Features
 
-- Simplify discovery endpoint path to /api-keys/uma2-configuration ([89463b8](../../commit/89463b8d2c48c2fef75229c4f2d23f9a50a6596d))
+- Add UMA token endpoint for authz-keycloak compatibility ([e7ac3f1](../../commit/e7ac3f1e7c690a6477b71d0d52182819cfd9085c))
 
