@@ -9,6 +9,7 @@ import com.mi.keycloak.apikeys.rest.representation.*;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 import org.keycloak.common.VerificationException;
@@ -25,6 +26,11 @@ import org.keycloak.services.managers.AuthenticationManager;
 import org.keycloak.TokenVerifier;
 import org.keycloak.wellknown.WellKnownProvider;
 
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.PublicKey;
@@ -38,6 +44,7 @@ import java.util.stream.Collectors;
 
 public class ApiKeyResource {
 
+    private static final String UMA_TICKET_GRANT = "urn:ietf:params:oauth:grant-type:uma-ticket";
     private static final Logger LOG = Logger.getLogger(ApiKeyResource.class);
 
     private final KeycloakSession session;
@@ -98,7 +105,7 @@ public class ApiKeyResource {
 
     // -------------------------------------------------------------------------
     // Discovery — même contenu que /.well-known/uma2-configuration natif
-    // mais avec introspection_endpoint pointant vers notre /introspect
+    // token_endpoint et introspection_endpoint pointent vers nos endpoints
     // -------------------------------------------------------------------------
 
     @GET
@@ -109,17 +116,38 @@ public class ApiKeyResource {
         Map<String, Object> config = new ObjectMapper().convertValue(
             nativeProvider.getConfig(), new TypeReference<>() {});
 
-        String base = session.getContext().getUri().getBaseUri().toString();
-        config.put("introspection_endpoint",
-            base + "realms/" + realm.getName() + "/api-keys/introspect");
+        String base = baseUrl();
+        config.put("token_endpoint",         base + "/token");
+        config.put("introspection_endpoint", base + "/introspect");
 
         return Response.ok(config).build();
     }
 
     // -------------------------------------------------------------------------
+    // Token endpoint UMA-compatible
+    // - API key (mk_...) + grant_type=uma-ticket → décision directe
+    // - Tout autre cas → proxy vers le vrai token endpoint Keycloak
+    // -------------------------------------------------------------------------
+
+    @POST
+    @Path("/token")
+    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response token() {
+        MultivaluedMap<String, String> params = session.getContext().getHttpRequest().getDecodedFormParameters();
+        String grantType   = params.getFirst("grant_type");
+        String bearerToken = extractBearer();
+
+        if (UMA_TICKET_GRANT.equals(grantType) && bearerToken != null && bearerToken.startsWith("mk_")) {
+            return umaTicketApiKey(bearerToken, params.getFirst("response_mode"));
+        }
+
+        return proxyToRealTokenEndpoint(params, bearerToken);
+    }
+
+    // -------------------------------------------------------------------------
     // Endpoint d'introspection unifié — RFC 7662 compatible
     // Accepte à la fois les JWT Keycloak et les API keys (mk_...)
-    // Même interface que /protocol/openid-connect/token/introspect
     // -------------------------------------------------------------------------
 
     @POST
@@ -137,21 +165,60 @@ public class ApiKeyResource {
             return Response.ok(inactive()).build();
         }
 
-        // Détection du type de token par le préfixe
-        if (token.startsWith("mk_")) {
-            return introspectApiKey(token.trim());
-        } else {
-            return introspectJwt(token.trim());
-        }
+        return token.startsWith("mk_") ? introspectApiKey(token.trim()) : introspectJwt(token.trim());
     }
 
     // -------------------------------------------------------------------------
 
-    private Response introspectApiKey(String rawKey) {
+    private Response umaTicketApiKey(String rawKey, String responseMode) {
         Optional<ApiKeyCredentialProvider.VerifyResult> match = provider().verifyKey(realm, rawKey);
         if (match.isEmpty()) {
-            return Response.ok(inactive()).build();
+            return Response.status(Response.Status.UNAUTHORIZED)
+                .entity("{\"error\":\"invalid_token\",\"error_description\":\"API key is invalid or expired\"}")
+                .build();
         }
+        // response_mode=decision → {"result": true}, sinon même réponse (RPT non supporté pour API keys)
+        return Response.ok("{\"result\":true}").build();
+    }
+
+    private Response proxyToRealTokenEndpoint(MultivaluedMap<String, String> formParams, String bearerToken) {
+        String realUrl = session.getContext().getUri().getBaseUri().toString()
+            + "realms/" + realm.getName() + "/protocol/openid-connect/token";
+
+        StringBuilder body = new StringBuilder();
+        formParams.forEach((key, values) -> values.forEach(value -> {
+            if (body.length() > 0) body.append('&');
+            body.append(URLEncoder.encode(key, StandardCharsets.UTF_8))
+                .append('=')
+                .append(URLEncoder.encode(value, StandardCharsets.UTF_8));
+        }));
+
+        try {
+            HttpRequest.Builder req = HttpRequest.newBuilder()
+                .uri(URI.create(realUrl))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(body.toString()));
+
+            if (bearerToken != null) req.header("Authorization", "Bearer " + bearerToken);
+
+            HttpResponse<String> resp = HttpClient.newHttpClient()
+                .send(req.build(), HttpResponse.BodyHandlers.ofString());
+
+            return Response.status(resp.statusCode())
+                .entity(resp.body())
+                .type(MediaType.APPLICATION_JSON)
+                .build();
+        } catch (Exception e) {
+            LOG.errorf("Failed to proxy token request: %s", e.getMessage());
+            return Response.serverError()
+                .entity("{\"error\":\"server_error\",\"error_description\":\"Failed to proxy request\"}")
+                .build();
+        }
+    }
+
+    private Response introspectApiKey(String rawKey) {
+        Optional<ApiKeyCredentialProvider.VerifyResult> match = provider().verifyKey(realm, rawKey);
+        if (match.isEmpty()) return Response.ok(inactive()).build();
 
         UserModel user = match.get().user();
         ApiKeyCredentialModel credential = match.get().credential();
@@ -213,7 +280,21 @@ public class ApiKeyResource {
     }
 
     private static VerifyApiKeyResponse inactive() {
-        return new VerifyApiKeyResponse(); // active = false par défaut
+        return new VerifyApiKeyResponse();
+    }
+
+    private String extractBearer() {
+        String authHeader = session.getContext().getHttpRequest()
+            .getHttpHeaders().getHeaderString(HttpHeaders.AUTHORIZATION);
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            return authHeader.substring(7).trim();
+        }
+        return null;
+    }
+
+    private String baseUrl() {
+        return session.getContext().getUri().getBaseUri().toString()
+            + "realms/" + realm.getName() + "/api-keys";
     }
 
     // -------------------------------------------------------------------------
@@ -229,7 +310,6 @@ public class ApiKeyResource {
     }
 
     private void authenticateClient(String clientId, String clientSecret) {
-        // Support aussi Basic Auth en fallback (RFC 6749 §2.3)
         if (clientId == null || clientId.isBlank()) {
             String authHeader = session.getContext().getHttpRequest()
                 .getHttpHeaders().getHeaderString(HttpHeaders.AUTHORIZATION);
