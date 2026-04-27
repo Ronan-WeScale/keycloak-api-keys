@@ -1,8 +1,8 @@
 # keycloak-api-keys
 
-Plugin Keycloak pour la gestion de clés d'API opaques (style GitHub PAT) liées aux utilisateurs Keycloak.
+Keycloak plugin for managing opaque API keys (GitHub PAT-style) tied to Keycloak users.
 
-## Compatibilité
+## Compatibility
 
 <!-- COMPAT_TABLE_START -->
 | Plugin     | Keycloak  |
@@ -20,46 +20,50 @@ Plugin Keycloak pour la gestion de clés d'API opaques (style GitHub PAT) liées
 
 ```bash
 mvn package -DskipTests
-# → target/keycloak-api-keys-1.0.0.jar
+# → target/keycloak-api-keys-1.3.0.jar
 ```
 
 ## Installation
 
-Copier le JAR dans le répertoire `providers/` de Keycloak puis relancer le build :
+Copy the JAR into Keycloak's `providers/` directory and rebuild:
 
 ```bash
-cp target/keycloak-api-keys-1.0.0.jar /opt/keycloak/providers/
+cp target/keycloak-api-keys-1.3.0.jar /opt/keycloak/providers/
 /opt/keycloak/bin/kc.sh build
 /opt/keycloak/bin/kc.sh start
 ```
 
-Sur Kubernetes, le JAR peut être monté via un `initContainer` ou un `ConfigMap` de type binaire. L'emplacement reste `/opt/keycloak/providers/`.
+On Kubernetes, the JAR can be mounted via an `initContainer`. The target path remains `/opt/keycloak/providers/`.
 
 ## Endpoints
 
-Tous les endpoints sont sous `/realms/{realm}/api-keys`.
+All endpoints are under `/realms/{realm}/api-keys`.
 
-### Lister ses clés
+### List keys
 
 ```http
 GET /realms/{realm}/api-keys
-Authorization: Bearer <jwt_keycloak>
+Authorization: Bearer <keycloak_jwt>
 ```
 
-### Créer une clé
+### Create a key
 
 ```http
 POST /realms/{realm}/api-keys
-Authorization: Bearer <jwt_keycloak>
+Authorization: Bearer <keycloak_jwt>
 Content-Type: application/json
 
 {
   "name": "CI pipeline",
-  "expiresAt": null
+  "expiresAt": null,
+  "roles": ["read", "deploy"]
 }
 ```
 
-Réponse (la `rawKey` n'est retournée qu'une seule fois) :
+- `expiresAt` — epoch milliseconds, `null` means no expiration
+- `roles` — optional scope restriction; `null` means the key inherits all user roles at introspection time
+
+Response (`rawKey` is returned only once):
 
 ```json
 {
@@ -69,42 +73,90 @@ Réponse (la `rawKey` n'est retournée qu'une seule fois) :
     "prefix": "mk_Ab3xYz12...",
     "createdAt": 1714000000000,
     "expiresAt": null,
-    "lastUsed": null
+    "lastUsed": null,
+    "roles": ["read", "deploy"]
   },
   "rawKey": "mk_Ab3xYz12..."
 }
 ```
 
-### Révoquer une clé
+### Revoke a key
 
 ```http
 DELETE /realms/{realm}/api-keys/{id}
-Authorization: Bearer <jwt_keycloak>
+Authorization: Bearer <keycloak_jwt>
 ```
 
-### Vérifier une clé (appelé par les services backend)
+### Introspect a token (RFC 7662)
+
+Accepts both Keycloak JWTs and API keys (`mk_...`). Requires a confidential client credential (Basic auth or form params).
 
 ```http
-POST /realms/{realm}/api-keys/verify
-Content-Type: application/json
+POST /realms/{realm}/api-keys/introspect
+Authorization: Basic <base64(client_id:client_secret)>
+Content-Type: application/x-www-form-urlencoded
 
-{ "key": "mk_Ab3xYz12..." }
+token=mk_Ab3xYz12...
 ```
+
+Response for an active API key:
 
 ```json
-{ "valid": true, "userId": "...", "username": "john", "email": "john@example.com" }
+{
+  "active": true,
+  "sub": "user-uuid",
+  "username": "john",
+  "email": "john@example.com",
+  "iat": 1714000000,
+  "exp": null,
+  "realm_access": {
+    "roles": ["read", "deploy"]
+  }
+}
 ```
 
-Cet endpoint n'exige pas de JWT — il doit être protégé au niveau réseau (non exposé publiquement) ou restreint à un réseau interne.
+Response for an inactive or unknown token:
 
-## Utilisation côté API
+```json
+{ "active": false }
+```
+
+### UMA token endpoint
+
+Compatible with `authz-keycloak` and any UMA2 client. When called with an API key as the bearer token and `grant_type=urn:ietf:params:oauth:grant-type:uma-ticket`, the plugin validates the key and returns a direct authorization decision. Any other grant type is proxied transparently to the real Keycloak token endpoint.
+
+```http
+POST /realms/{realm}/api-keys/token
+Authorization: Bearer mk_Ab3xYz12...
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Auma-ticket&response_mode=decision
+```
+
+Response:
+
+```json
+{ "result": true }
+```
+
+### UMA2 discovery
+
+Returns the standard `uma2-configuration` document with `token_endpoint` and `introspection_endpoint` overridden to point to this plugin's endpoints.
+
+```http
+GET /realms/{realm}/api-keys/uma2-configuration
+```
+
+## Usage from API clients
+
+Pass the API key as a Bearer token:
 
 ```
 Authorization: Bearer mk_Ab3xYz12...
 ```
 
-Le service backend appelle `/realms/{realm}/api-keys/verify` avec la clé extraite du header pour valider la requête et récupérer l'identité de l'utilisateur.
+The backend service calls `/realms/{realm}/api-keys/introspect` with the extracted key to validate the request and retrieve the user identity and roles.
 
 ## Changelog
 
-Voir [CHANGELOG.md](./CHANGELOG.md) ou les [releases GitHub](../../releases).
+See [CHANGELOG.md](./CHANGELOG.md) or the [GitHub releases](../../releases).
